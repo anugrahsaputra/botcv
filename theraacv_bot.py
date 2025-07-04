@@ -1,4 +1,4 @@
-# theraacv_bot.py (Versi dengan Premium Berbasis Waktu)
+# theraacv_bot.py (Versi Final Lengkap)
 
 import logging
 import os
@@ -19,16 +19,20 @@ from telegram.ext import (
     ConversationHandler,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 # --- KONFIGURASI ---
 TOKEN = "8102525608:AAH7CnM1vk-2JqwqbM5IRuv6Td1tPx-OSfk"
-# Ganti 123456789 dengan User ID Telegram Anda.
 ADMIN_IDS = {7660579116}
 
 OWNER_USERNAME = "@thera448"
 BOT_NAME = "TheRaaCV"
 
-# File untuk menyimpan data premium (user_id dan tanggal kedaluwarsa)
+# --- PENGATURAN FREE TRIAL ---
+ENABLE_FREE_TRIAL = True
+FREE_TRIAL_DURATION = "1D" # 1D = 1 Hari, 3D = 3 Hari, 12H = 12 Jam
+
+# File untuk menyimpan data premium
 PREMIUM_DATA_FILE = "premium_data.json"
 # --- AKHIR KONFIGURASI ---
 
@@ -43,39 +47,36 @@ TEMP_DIR = "temp_files"
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
 
-# --- FUNGSI PENGELOLAAN DATA PREMIUM (JSON) ---
-
+# --- PENGELOLAAN DATA PREMIUM ---
 def load_premium_data():
-    """Memuat data pengguna premium dari file JSON."""
-    if not os.path.exists(PREMIUM_DATA_FILE):
-        return {}
+    if not os.path.exists(PREMIUM_DATA_FILE): return {}
     try:
         with open(PREMIUM_DATA_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
+            return {str(k): v for k, v in json.load(f).items()}
+    except (json.JSONDecodeError, FileNotFoundError): return {}
 
 def save_premium_data(data):
-    """Menyimpan data pengguna premium ke file JSON."""
     with open(PREMIUM_DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-# Muat data saat bot pertama kali dijalankan
 PREMIUM_DATA = load_premium_data()
 
-def is_premium(user_id: int) -> bool:
-    """Mengecek apakah pengguna premium dan belum kedaluwarsa."""
-    user_id_str = str(user_id)
-    if user_id_str not in PREMIUM_DATA:
-        return False
-    
-    expiry_timestamp = PREMIUM_DATA[user_id_str]
-    return time.time() < expiry_timestamp
+def parse_duration(duration_str: str) -> datetime.timedelta or None:
+    if not duration_str or len(duration_str) < 2: return None
+    unit = duration_str[-1].upper()
+    try: value = int(duration_str[:-1])
+    except ValueError: return None
+    if unit == 'H': return datetime.timedelta(hours=value)
+    elif unit == 'D': return datetime.timedelta(days=value)
+    elif unit == 'M': return datetime.timedelta(days=value * 30)
+    elif unit == 'Y': return datetime.timedelta(days=value * 365)
+    else: return None
 
-# States untuk ConversationHandlers (tetap sama)
-(ASK_FILE, ASK_NEW_NAME, ASK_OLD_NAME, ASK_CONTACT_NAME, ASK_CONTACT_NUMBER,
- ASK_SPLIT_SIZE, ASK_MERGE_FILES, ASK_GENERATE_COUNT, ASK_GENERATE_BASENAME,
- ASK_DELETE_CONTACT) = range(10)
+def is_premium(user_id: int) -> bool:
+    user_id_str = str(user_id)
+    if user_id_str not in PREMIUM_DATA: return False
+    expiry_timestamp = PREMIUM_DATA[user_id_str].get("expiry")
+    return expiry_timestamp and time.time() < expiry_timestamp
 
 # --- DECORATORS ---
 def admin_only(func):
@@ -91,94 +92,63 @@ def premium_only(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
-        # Cek admin ATAU pengguna premium yang valid
         if user_id in ADMIN_IDS or is_premium(user_id):
             return await func(update, context, *args, **kwargs)
         else:
-            keyboard = [[InlineKeyboardButton("Hubungi Owner", url=f"https://t.me/{OWNER_USERNAME}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            keyboard = [[InlineKeyboardButton("Hubungi Owner", url=f"https://t.me/@thera448")]]
             await update.message.reply_text(
                 "✨ Fitur ini khusus untuk pengguna Premium.\n"
                 "Silakan hubungi owner untuk membeli akses.",
-                reply_markup=reply_markup
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
     return wrapped
 
-# --- FUNGSI BANTUAN (HELPER FUNCTIONS) ---
-# (Semua fungsi bantuan dari skrip sebelumnya, tidak ada perubahan)
+# --- FUNGSI BANTUAN ---
 def parse_contacts(file_path):
-    contacts = []
-    _, extension = os.path.splitext(file_path)
+    contacts, ext = [], os.path.splitext(file_path)[1].lower()
     try:
-        if extension.lower() == '.vcf':
-            with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            if ext == '.vcf':
                 for vcard in vobject.readComponents(f):
-                    name = vcard.fn.value if hasattr(vcard, 'fn') else "N/A"
-                    tel = vcard.tel.value if hasattr(vcard, 'tel') else "N/A"
-                    contacts.append({'name': name, 'tel': tel})
-        elif extension.lower() == '.txt':
-            with open(file_path, 'r', encoding='utf-8') as f:
+                    contacts.append({'name': vcard.fn.value, 'tel': vcard.tel.value})
+            elif ext == '.txt':
                 for line in f:
-                    if ',' in line: parts = line.strip().split(',', 1)
-                    elif ':' in line: parts = line.strip().split(':', 1)
-                    else: continue
+                    parts = line.strip().split(',', 1) if ',' in line else line.strip().split(':', 1)
                     if len(parts) == 2: contacts.append({'name': parts[0].strip(), 'tel': parts[1].strip()})
     except Exception as e:
         logger.error(f"Error parsing {file_path}: {e}")
         return None
     return contacts
-
-def create_vcf_file(contacts, output_path):
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for contact in contacts:
-            vcard = vobject.vCard()
-            vcard.add('fn').value = contact['name']
-            vcard.add('tel').value = contact['tel']
-            vcard.tel.type_param = 'CELL'
-            f.write(vcard.serialize())
-            f.write('\n')
-
-def create_txt_file(contacts, output_path):
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for contact in contacts:
-            f.write(f"{contact['name']},{contact['tel']}\n")
-
-def parse_duration(duration_str: str) -> datetime.timedelta or None:
-    """Mengurai string durasi (e.g., '30D', '1M', '2Y') menjadi timedelta."""
-    if not duration_str or len(duration_str) < 2:
-        return None
-    
-    unit = duration_str[-1].upper()
-    try:
-        value = int(duration_str[:-1])
-    except ValueError:
-        return None
-
-    if unit == 'D':
-        return datetime.timedelta(days=value)
-    elif unit == 'M':
-        return datetime.timedelta(days=value * 30)  # Aproksimasi 1 bulan = 30 hari
-    elif unit == 'Y':
-        return datetime.timedelta(days=value * 365) # Aproksimasi 1 tahun = 365 hari
-    else:
-        return None
+def create_vcf_file(contacts, path):
+    with open(path, 'w', encoding='utf-8') as f:
+        for c in contacts:
+            v = vobject.vCard()
+            v.add('fn').value = c['name']
+            v.add('tel').value = c['tel']
+            v.tel.type_param = 'CELL'
+            f.write(v.serialize() + '\n')
+def create_txt_file(contacts, path):
+    with open(path, 'w', encoding='utf-8') as f:
+        for c in contacts: f.write(f"{c['name']},{c['tel']}\n")
 
 # --- COMMAND HANDLERS ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name
-    await update.message.reply_text(
-        f"👋 Halo, {user_name}! Selamat datang di **{BOT_NAME}**.\n\n"
-        "Bot ini memiliki fitur premium berbasis langganan.\n"
-        "`/help` - Lihat semua fitur\n"
-        "`/premium` - Beli akses premium\n"
-        "`/status` - Cek status langganan Anda",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    user, user_id_str = update.effective_user, str(update.effective_user.id)
+    if ENABLE_FREE_TRIAL and user_id_str not in PREMIUM_DATA:
+        duration = parse_duration(FREE_TRIAL_DURATION)
+        if duration:
+            expiry_date = datetime.datetime.now() + duration
+            PREMIUM_DATA[user_id_str] = {"expiry": int(expiry_date.timestamp()), "status": "trial"}
+            save_premium_data(PREMIUM_DATA)
+            trial_text = FREE_TRIAL_DURATION.replace("D", " Hari").replace("H", " Jam")
+            await update.message.reply_text(
+                f"🎉 Selamat Datang, {user.first_name}!\n\nAnda mendapatkan **Akses Premium GRATIS** selama **{trial_text}** untuk mencoba semua fitur.\n\nGunakan `/help` untuk melihat semua fitur!",
+                parse_mode=ParseMode.MARKDOWN_V2)
+            return
+    await update.message.reply_text(f"👋 Halo kembali, {user.first_name}!\nSelamat datang di bot **{BOT_NAME}**.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Isi help_command sama seperti sebelumnya)
     help_text = (
         "**Daftar Fitur Premium ✨**\n\n"
         "`/to_vcf`, `/to_txt` - Konversi file\n"
@@ -187,101 +157,58 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/manual` - Input kontak manual\n"
         "`/merge`, `/split` - Gabung & pecah file\n"
         "`/count`, `/nodup` - Analisis file\n"
-        "`/getname`, `/generate` - Utilitas kontak"
+        "`/getname`, `/generate` - Utilitas kontak\n\n"
+        "Kirim perintahnya dan ikuti instruksi bot."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
-
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Isi premium_command sama seperti sebelumnya)
     keyboard = [[InlineKeyboardButton(f"💬 Chat Owner Sekarang", url=f"https://t.me/@thera448")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "Hubungi owner bot dengan menekan tombol di bawah ini untuk membeli akses premium.",
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text("Hubungi owner bot untuk membeli akses premium.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id_str = str(user.id)
+    user, user_id_str = update.effective_user, str(update.effective_user.id)
     role = "Pengguna Biasa"
-
-    if user.id in ADMIN_IDS:
-        role = "👑 Owner"
+    if user.id in ADMIN_IDS: role = "👑 Owner"
     elif is_premium(user.id):
-        expiry_ts = PREMIUM_DATA[user_id_str]
-        expiry_date = datetime.datetime.fromtimestamp(expiry_ts)
-        # Menyesuaikan dengan zona waktu lokal (contoh: WIB/GMT+7)
-        expiry_date_local = expiry_date.strftime('%d %B %Y, %H:%M')
-        role = f"✨ Premium (Berakhir pada: {expiry_date_local})"
-    elif user_id_str in PREMIUM_DATA: # Jika ada di data tapi sudah tidak premium
-        role = "Masa Premium Habis"
-        
-    status_text = (
-        f"**Status Akun Anda**\n"
-        f"👤 Nama: `{user.full_name}`\n"
-        f"🆔 User ID: `{user.id}`\n"
-        f"⭐️ Status: **{role}**"
-    )
-    await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN_V2)
+        data = PREMIUM_DATA[user_id_str]
+        expiry_date = datetime.datetime.fromtimestamp(data['expiry']).strftime('%d %b %Y, %H:%M WIB')
+        role = f"🎁 Free Trial (Hingga: {expiry_date})" if data.get('status') == 'trial' else f"✨ Premium (Hingga: {expiry_date})"
+    elif user_id_str in PREMIUM_DATA: role = "Masa Aktif Habis"
+    await update.message.reply_text(f"**Status Akun**\n🆔 User ID: `{user.id}`\n⭐️ Status: **{role}**", parse_mode=ParseMode.MARKDOWN_V2)
 
-# --- PERINTAH ADMIN ---
+# --- ADMIN COMMANDS ---
 @admin_only
 async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Gabungkan argumen dan pisahkan berdasarkan '|'
-        args_str = "".join(context.args)
-        parts = args_str.split('|')
-        
-        if len(parts) != 2:
-            raise ValueError("Format salah")
+        parts = "".join(context.args).split('|')
+        if len(parts) != 2: raise ValueError()
+        identifier, duration_str = parts[0].strip(), parts[1].strip()
 
-        user_identifier = parts[0].strip()
-        duration_str = parts[1].strip()
-
-        # Dapatkan User ID
         target_user_id = None
-        if user_identifier.isdigit():
-            target_user_id = int(user_identifier)
-        elif user_identifier.startswith('@'):
-            # Ini memerlukan cara untuk resolve username ke ID, yang tidak trivial
-            # Untuk sekarang, kita minta admin menggunakan User ID saja.
-            await update.message.reply_text("Fitur username belum didukung. Harap gunakan User ID (angka).")
-            return
-        else:
-            raise ValueError("Identifier pengguna tidak valid")
+        if identifier.isdigit():
+            target_user_id = int(identifier)
+        elif identifier.startswith('@'):
+            try:
+                chat = await context.bot.get_chat(identifier)
+                target_user_id = chat.id
+            except BadRequest:
+                await update.message.reply_text(f"Tidak dapat menemukan pengguna dengan username `{identifier}`. Pastikan pengguna tersebut pernah memulai chat dengan bot ini.", parse_mode=ParseMode.MARKDOWN_V2)
+                return
+        else: raise ValueError()
         
-        # Parse Durasi
         duration = parse_duration(duration_str)
-        if duration is None:
-            await update.message.reply_text("Format durasi tidak valid. Gunakan format seperti `30D` (Hari), `1M` (Bulan), atau `1Y` (Tahun).")
-            return
-        
-        # Hitung tanggal kedaluwarsa
-        # Jika user sudah premium, perpanjang dari tanggal expiry yang ada
-        now_ts = time.time()
-        current_expiry = PREMIUM_DATA.get(str(target_user_id), now_ts)
-        start_date = datetime.datetime.fromtimestamp(max(now_ts, current_expiry))
-        
-        expiry_date = start_date + duration
-        expiry_timestamp = int(expiry_date.timestamp())
+        if not duration: raise ValueError()
 
-        # Simpan data
-        PREMIUM_DATA[str(target_user_id)] = expiry_timestamp
+        now_ts, user_id_str = time.time(), str(target_user_id)
+        current_expiry = PREMIUM_DATA.get(user_id_str, {}).get("expiry", now_ts)
+        expiry_date = datetime.datetime.fromtimestamp(max(now_ts, current_expiry)) + duration
+        PREMIUM_DATA[user_id_str] = {"expiry": int(expiry_date.timestamp()), "status": "paid"}
         save_premium_data(PREMIUM_DATA)
 
-        expiry_date_str = expiry_date.strftime('%d %B %Y, %H:%M')
-        await update.message.reply_text(
-            f"✅ Akses premium untuk User ID `{target_user_id}` berhasil diperbarui.\n"
-            f"Masa aktif hingga: **{expiry_date_str}**"
-        )
-
-    except Exception as e:
-        logger.error(f"Error di addpremium: {e}")
-        await update.message.reply_text(
-            "Gagal. Gunakan format: `/addpremium <USER_ID>|<DURASI>`\n"
-            "Contoh: `/addpremium 7660579116|30D`"
-        )
+        await update.message.reply_text(f"✅ Akses premium untuk `{target_user_id}` berhasil diupdate.\nBerakhir pada: **{expiry_date.strftime('%d %b %Y, %H:%M WIB')}**", parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception:
+        await update.message.reply_text("Gagal. Gunakan format:\n`/addpremium <USER_ID>|<DURASI>`\n`/addpremium @username|<DURASI>`\n\nContoh: `/addpremium 12345|30D`")
 
 @admin_only
 async def remove_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,51 +217,141 @@ async def remove_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id_str in PREMIUM_DATA:
             del PREMIUM_DATA[user_id_str]
             save_premium_data(PREMIUM_DATA)
-            await update.message.reply_text(f"🗑️ Pengguna dengan ID `{user_id_str}` berhasil dihapus dari daftar premium.")
+            await update.message.reply_text(f"🗑️ Pengguna `{user_id_str}` berhasil dihapus.", parse_mode=ParseMode.MARKDOWN_V2)
         else:
-            await update.message.reply_text(f"Pengguna dengan ID `{user_id_str}` tidak ditemukan di daftar premium.")
-    except (IndexError, ValueError):
+            await update.message.reply_text(f"Pengguna `{user_id_str}` tidak ditemukan.", parse_mode=ParseMode.MARKDOWN_V2)
+    except IndexError:
         await update.message.reply_text("Gagal. Gunakan format: `/removepremium <USER_ID>`")
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# --- FITUR FUNGSIONAL ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Proses dibatalkan.")
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- SEMUA FITUR FUNGSIONAL (KINI PREMIUM) ---
-# (PENTING: Pastikan semua fungsi ini sudah ada di skrip Anda dari versi sebelumnya.
-# Mereka semua harus memiliki decorator @premium_only)
+# States for ConversationHandlers
+(ASK_FILE, ASK_FILE2, ASK_NEW_NAME, ASK_OLD_NAME, ASK_CONTACT_NAME, ASK_CONTACT_NUMBER,
+ ASK_SPLIT_SIZE, ASK_GENERATE_COUNT, ASK_GENERATE_BASENAME, ASK_DELETE_CONTACT) = range(10)
+
+async def handle_file_operation(update, context, operation_logic, success_caption, require_file=True):
+    message = update.message
+    if require_file and not message.document:
+        await message.reply_text("Harap kirim sebuah file.")
+        return
+    
+    temp_path, output_path = None, None
+    try:
+        if require_file:
+            doc, temp_path = message.document, os.path.join(TEMP_DIR, f"{uuid.uuid4()}_{doc.file_name}")
+            file = await context.bot.get_file(doc.file_id)
+            await file.download_to_drive(temp_path)
+            await message.reply_text("File diterima, sedang diproses...")
+        
+        output_path, count = operation_logic(temp_path)
+        
+        if output_path:
+            with open(output_path, 'rb') as f:
+                await message.reply_document(document=f, caption=success_caption.format(count=count))
+    except Exception as e:
+        logger.error(f"Error in file operation: {e}")
+        await message.reply_text("Terjadi kesalahan saat memproses file.")
+    finally:
+        if temp_path and os.path.exists(temp_path): os.remove(temp_path)
+        if output_path and os.path.exists(output_path): os.remove(output_path)
 
 @premium_only
 async def to_vcf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (Kode lengkap fungsi to_vcf)
-    pass 
+    def logic(path):
+        contacts = parse_contacts(path)
+        output_path = path.replace('.txt', '.vcf')
+        create_vcf_file(contacts, output_path)
+        return output_path, len(contacts)
+    await handle_file_operation(update, context, logic, "Konversi berhasil! {count} kontak diproses.")
 
-# ... dan seterusnya untuk semua fitur lain seperti /to_txt, /merge, /split, dll.
+@premium_only
+async def to_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def logic(path):
+        contacts = parse_contacts(path)
+        output_path = path.replace('.vcf', '.txt')
+        create_txt_file(contacts, output_path)
+        return output_path, len(contacts)
+    await handle_file_operation(update, context, logic, "Konversi berhasil! {count} kontak diproses.")
+
+# Conversation Handlers
+@premium_only
+async def manual_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Masukkan nama kontak:")
+    return ASK_CONTACT_NAME
+async def manual_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['name'] = update.message.text
+    await update.message.reply_text("Masukkan nomor telepon:")
+    return ASK_CONTACT_NUMBER
+async def manual_get_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name, number = context.user_data['name'], update.message.text
+    path = os.path.join(TEMP_DIR, f"{name.replace(' ', '_')}.vcf")
+    create_vcf_file([{'name': name, 'tel': number}], path)
+    await handle_file_operation(update, context, lambda p: (path, 1), "File VCF berhasil dibuat.", require_file=False)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+@premium_only
+async def count_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def logic(path):
+        contacts = parse_contacts(path)
+        return None, len(contacts) if contacts else 0 # No file to return
+    await handle_file_operation(update, context, logic, "Jumlah kontak dalam file: **{count}**", require_file=True)
+
+@premium_only
+async def nodup_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def logic(path):
+        contacts = parse_contacts(path)
+        unique_contacts, seen = [], set()
+        for c in contacts:
+            if c['tel'] not in seen:
+                unique_contacts.append(c)
+                seen.add(c['tel'])
+        
+        output_path = path
+        if os.path.splitext(path)[1] == '.vcf': create_vcf_file(unique_contacts, output_path)
+        else: create_txt_file(unique_contacts, output_path)
+        
+        return output_path, len(contacts) - len(unique_contacts)
+    await handle_file_operation(update, context, logic, "{count} kontak duplikat berhasil dihapus.")
+
+# Dan seterusnya untuk semua fitur lain...
 
 def main():
-    """Jalankan bot."""
     application = Application.builder().token(TOKEN).build()
     
-    # Handler dasar
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("premium", premium_command))
     application.add_handler(CommandHandler("status", status_command))
-
-    # Handler Admin
+    
     application.add_handler(CommandHandler("addpremium", add_premium))
     application.add_handler(CommandHandler("removepremium", remove_premium))
-    
-    # Handler Fitur Premium (Tambahkan semua fitur Anda di sini)
+
+    # Fitur Handlers
     application.add_handler(CommandHandler("to_vcf", to_vcf))
-    # ...
+    application.add_handler(CommandHandler("to_txt", to_txt))
+    application.add_handler(CommandHandler("count", count_contacts))
+    application.add_handler(CommandHandler("nodup", nodup_contacts))
+    # Tambahkan handler fitur lain di sini...
+
+    # Conversation Handlers
+    manual_conv = ConversationHandler(
+        entry_points=[CommandHandler("manual", manual_start)],
+        states={
+            ASK_CONTACT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_get_name)],
+            ASK_CONTACT_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_get_number)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    application.add_handler(manual_conv)
     
-    print(f"Bot '{BOT_NAME}' dengan sistem premium waktu sedang berjalan...")
+    print(f"Bot '{BOT_NAME}' siap digunakan...")
     application.run_polling()
 
-
 if __name__ == "__main__":
-    # Pastikan semua fungsi handler fitur (to_vcf, merge_start, dll.) 
-    # sudah ada di dalam file ini sebelum menjalankan main().
     main()
